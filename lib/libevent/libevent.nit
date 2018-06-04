@@ -40,6 +40,7 @@ in "C" `{
 	#include <netinet/in.h>
 	#include <netinet/ip.h>
 	#include <sys/un.h>
+	#include <unistd.h>
 
 // Protect callbacks for compatibility with light FFI
 #ifdef Connection_decr_ref
@@ -196,7 +197,6 @@ class Connection
 		var evbuffer = bev.input_buffer
 		var len = evbuffer.length
 		var buf = new CString(len)
-		bev.copyout(buf)
 		evbuffer.remove(buf, len)
 		var str = buf.to_s_with_length(len)
 		read_callback str
@@ -389,12 +389,6 @@ extern class NativeBufferEvent `{ struct bufferevent * `}
 	# Write data to this buffer
 	fun write_buffer(buf: NativeEvBuffer): Int `{ return bufferevent_write_buffer(self, buf); `}
 
-	# Extract data from event buffer with ad-hoc libevent function
-	fun copyout(data: CString)`{
-		struct evbuffer* input = bufferevent_get_input(self);
-		size_t length = evbuffer_get_length(input);
-		evbuffer_copyout(input,data,length);
-	`}
 end
 
 # A single buffer
@@ -432,7 +426,7 @@ extern class ConnectionListener `{ struct evconnlistener * `}
 	private new bind_to(base: NativeEventBase, address: CString, port: Int, factory: ConnectionFactory)
 	import ConnectionFactory.accept_connection, error_callback `{
 
-		struct sockaddr_in sin;
+		struct sockaddr_in sin = {0};
 		struct evconnlistener *listener;
 		ConnectionFactory_incr_ref(factory);
 
@@ -442,7 +436,6 @@ extern class ConnectionListener `{ struct evconnlistener * `}
 			return NULL;
 		}
 
-		memset(&sin, 0, sizeof(sin));
 		sin.sin_family = hostent->h_addrtype;
 		sin.sin_port = htons(port);
 		memcpy( &(sin.sin_addr.s_addr), (const void*)hostent->h_addr, hostent->h_length );
@@ -475,15 +468,17 @@ extern class UnixConnectionListener `{ struct evconnlistener * `}
 
 	private new bind_to(base: NativeEventBase, address: CString, file: CString, factory: ConnectionFactory)
 	import ConnectionFactory.accept_connection, error_callback `{
-		struct sockaddr_un sun;
+		struct sockaddr_un sun = {0};
 		struct evconnlistener *listener;
 
-		unlink(file);
+		// Unlink before bind, crash if fails
+		if(unlink(file)!=0 && access(file,F_OK)!=-1){
+			printf("libevent error: unlink failed on file %s",file);
+			exit(-1);
+		}
 
 		ConnectionFactory_incr_ref(factory);
-		struct hostent *hostent = gethostbyname(address);
 
-		memset(&sun, 0, sizeof(struct sockaddr_un));
 		sun.sun_family = AF_UNIX;
 		strncpy(sun.sun_path, file, sizeof(sun.sun_path) - 1);
 
@@ -531,7 +526,7 @@ class ConnectionFactory
 	do
 		var listener = new UnixConnectionListener.bind_to(event_base, hostname.to_cstring, file.to_cstring, self)
 		if listener.address_is_null then
-			sys.stderr.write "Unix libevent warning: Opening {hostname}::{file} failed\n"
+			sys.stderr.write "libevent warning: Opening {hostname}::{file} failed\n"
 			listener.error_callback
 		end
 		return listener
