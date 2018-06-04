@@ -2,6 +2,7 @@
 #
 # Copyright 2013 Jean-Philippe Caissy <jpcaissy@piji.ca>
 # Copyright 2014 Alexis Laferrière <alexis.laf@xymus.net>
+# Copyright 2018 Matthieu Le Guellaut <leguellaut.matthieu@gmail.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,6 +39,8 @@ in "C" `{
 	#include <arpa/inet.h>
 	#include <netinet/in.h>
 	#include <netinet/ip.h>
+	#include <sys/un.h>
+	#include <unistd.h>
 
 // Protect callbacks for compatibility with light FFI
 #ifdef Connection_decr_ref
@@ -188,6 +191,7 @@ class Connection
 		if close_requested then close
 	end
 
+	# Method reading buffer_event content
 	private fun read_callback_native(bev: NativeBufferEvent)
 	do
 		var evbuffer = bev.input_buffer
@@ -384,6 +388,7 @@ extern class NativeBufferEvent `{ struct bufferevent * `}
 
 	# Write data to this buffer
 	fun write_buffer(buf: NativeEvBuffer): Int `{ return bufferevent_write_buffer(self, buf); `}
+
 end
 
 # A single buffer
@@ -421,7 +426,7 @@ extern class ConnectionListener `{ struct evconnlistener * `}
 	private new bind_to(base: NativeEventBase, address: CString, port: Int, factory: ConnectionFactory)
 	import ConnectionFactory.accept_connection, error_callback `{
 
-		struct sockaddr_in sin;
+		struct sockaddr_in sin = {0};
 		struct evconnlistener *listener;
 		ConnectionFactory_incr_ref(factory);
 
@@ -431,7 +436,6 @@ extern class ConnectionListener `{ struct evconnlistener * `}
 			return NULL;
 		}
 
-		memset(&sin, 0, sizeof(sin));
 		sin.sin_family = hostent->h_addrtype;
 		sin.sin_port = htons(port);
 		memcpy( &(sin.sin_addr.s_addr), (const void*)hostent->h_addr, hostent->h_length );
@@ -458,6 +462,37 @@ extern class ConnectionListener `{ struct evconnlistener * `}
 	end
 end
 
+# A listener acting on an Unix Socket, spawns `Connection` on new connections
+extern class UnixConnectionListener `{ struct evconnlistener * `}
+	super ConnectionListener
+
+	private new bind_to(base: NativeEventBase, address: CString, file: CString, factory: ConnectionFactory)
+	import ConnectionFactory.accept_connection, error_callback `{
+		struct sockaddr_un sun = {0};
+		struct evconnlistener *listener;
+
+		// Unlink before bind, crash if fails
+		if(unlink(file)!=0 && access(file,F_OK)!=-1){
+			printf("libevent error: unlink failed on file %s",file);
+			exit(-1);
+		}
+
+		ConnectionFactory_incr_ref(factory);
+
+		sun.sun_family = AF_UNIX;
+		strncpy(sun.sun_path, file, sizeof(sun.sun_path) - 1);
+
+		listener = evconnlistener_new_bind(base, (evconnlistener_cb)accept_connection_cb, factory,
+			LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1,
+			(struct sockaddr*)&sun, sizeof(sun));
+
+		if (listener != NULL) {
+			evconnlistener_set_error_cb(listener, (evconnlistener_errorcb)ConnectionListener_error_callback);
+		}
+		return listener;
+	`}
+end
+
 # Factory to listen on sockets and create new `Connection`
 class ConnectionFactory
 	# The `NativeEventBase` for the dispatch loop of this factory
@@ -470,18 +505,31 @@ class ConnectionFactory
 	do
 		var base = listener.base
 		var bev = new NativeBufferEvent.socket(base, fd, bev_opt_close_on_free)
+		var addr=""
 
-		# Human representation of remote client address
-		var addr_len = 46 # Longest possible IPv6 address + null byte
-		var addr_buf = new CString(addr_len)
-		addr_buf = addrin_to_address(addrin, addr_buf, addr_len)
-		var addr = if addr_buf.address_is_null then
-				"Unknown address"
-			else addr_buf.to_s
-
+		if not listener isa UnixConnectionListener then
+			# Human representation of remote client address
+			var addr_len = 46 # Longest possible IPv6 address + null byte
+			var addr_buf = new CString(addr_len)
+			addr_buf = addrin_to_address(addrin, addr_buf, addr_len)
+			addr = if addr_buf.address_is_null then
+					"Unknown address"
+				else addr_buf.to_s
+		end
 		var conn = spawn_connection(bev, addr)
 		bev.enable ev_read|ev_write
 		bev.setcb conn
+	end
+
+	# Listen on domain & file for new connection, which will callback `spawn_connection`
+	fun bind_to_unix(hostname: String, file: String): nullable ConnectionListener
+	do
+		var listener = new UnixConnectionListener.bind_to(event_base, hostname.to_cstring, file.to_cstring, self)
+		if listener.address_is_null then
+			sys.stderr.write "libevent warning: Opening {hostname}::{file} failed\n"
+			listener.error_callback
+		end
+		return listener
 	end
 
 	# Create a new `Connection` object for `buffer_event`
