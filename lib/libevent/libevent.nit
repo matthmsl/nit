@@ -67,14 +67,6 @@ in "C" `{
 	{
 		ConnectionFactory_accept_connection(ctx, listener, fd, addrin, socklen);
 	}
-
-	// Callback forwarded to 'ConnectionFactory.accept_unix_connection'
-	static void accept_unix_connection(struct evconnlistener *listener,
-		evutil_socket_t fd, struct sockaddr *addrin,int socklen,
-		ConnectionFactory ctx)
-	{
-		ConnectionFactory_accept_unix_connection(ctx, listener, fd, addrin, socklen);
-	}
 #endif
 
 #ifdef EventCallback_incr_ref
@@ -482,7 +474,7 @@ extern class UnixConnectionListener `{ struct evconnlistener * `}
 	super ConnectionListener
 
 	private new bind_to(base: NativeEventBase, address: CString, file: CString, factory: ConnectionFactory)
-	import ConnectionFactory.accept_unix_connection, error_callback `{
+	import ConnectionFactory.accept_connection, error_callback `{
 		struct sockaddr_un sun;
 		struct evconnlistener *listener;
 
@@ -495,7 +487,7 @@ extern class UnixConnectionListener `{ struct evconnlistener * `}
 		sun.sun_family = AF_UNIX;
 		strncpy(sun.sun_path, file, sizeof(sun.sun_path) - 1);
 
-		listener = evconnlistener_new_bind(base, (evconnlistener_cb)accept_unix_connection, factory,
+		listener = evconnlistener_new_bind(base, (evconnlistener_cb)accept_connection_cb, factory,
 			LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1,
 			(struct sockaddr*)&sun, sizeof(sun));
 
@@ -518,26 +510,17 @@ class ConnectionFactory
 	do
 		var base = listener.base
 		var bev = new NativeBufferEvent.socket(base, fd, bev_opt_close_on_free)
-
-		# Human representation of remote client address
-		var addr_len = 46 # Longest possible IPv6 address + null byte
-		var addr_buf = new CString(addr_len)
-		addr_buf = addrin_to_address(addrin, addr_buf, addr_len)
-		var addr = if addr_buf.address_is_null then
-				"Unknown address"
-			else addr_buf.to_s
-
-		var conn = spawn_connection(bev, addr)
-		bev.enable ev_read|ev_write
-		bev.setcb conn
-	end
-
-	# Accept a connection on a Unix socket
-	fun accept_unix_connection(listener: ConnectionListener, fd: Int, addrin: Pointer, socklen: Int)
-	do
-		var base = listener.base
-		var bev = new NativeBufferEvent.socket(base, fd, bev_opt_close_on_free)
 		var addr=""
+
+		if not listener isa UnixConnectionListener then
+			# Human representation of remote client address
+			var addr_len = 46 # Longest possible IPv6 address + null byte
+			var addr_buf = new CString(addr_len)
+			addr_buf = addrin_to_address(addrin, addr_buf, addr_len)
+			addr = if addr_buf.address_is_null then
+					"Unknown address"
+				else addr_buf.to_s
+		end
 		var conn = spawn_connection(bev, addr)
 		bev.enable ev_read|ev_write
 		bev.setcb conn
