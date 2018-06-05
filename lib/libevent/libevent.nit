@@ -460,6 +460,36 @@ extern class ConnectionListener `{ struct evconnlistener * `}
 		var cstr = evutil_socket_error_to_string(evutil_socket_error)
 		print_error "libevent error: '{cstr}'"
 	end
+
+	fun resolve_addr(addrin: Pointer): String
+	do
+		var addr = ""
+		if not self isa UnixConnectionListener then
+			# Human representation of remote client address
+			var addr_len = 46 # Longest possible IPv6 address + null byte
+			var addr_buf = new CString(addr_len)
+			addr_buf = addrin_to_address(addrin, addr_buf, addr_len)
+			addr = if addr_buf.address_is_null then
+					"Unknown address"
+				else addr_buf.to_s
+		end
+		return addr
+	end
+
+	# Put string representation of source `address` into `buf`
+	private fun addrin_to_address(address: Pointer, buf: CString, buf_len: Int): CString `{
+		struct sockaddr *addrin = (struct sockaddr*)address;
+
+		if (addrin->sa_family == AF_INET) {
+			struct in_addr *src = &((struct sockaddr_in*)addrin)->sin_addr;
+			return (char *)inet_ntop(addrin->sa_family, src, buf, buf_len);
+		}
+		else if (addrin->sa_family == AF_INET6) {
+			struct in6_addr *src = &((struct sockaddr_in6*)addrin)->sin6_addr;
+			return (char *)inet_ntop(addrin->sa_family, src, buf, buf_len);
+		}
+		return NULL;
+	`}
 end
 
 # A listener acting on an Unix Socket, spawns `Connection` on new connections
@@ -505,17 +535,9 @@ class ConnectionFactory
 	do
 		var base = listener.base
 		var bev = new NativeBufferEvent.socket(base, fd, bev_opt_close_on_free)
-		var addr=""
 
-		if not listener isa UnixConnectionListener then
-			# Human representation of remote client address
-			var addr_len = 46 # Longest possible IPv6 address + null byte
-			var addr_buf = new CString(addr_len)
-			addr_buf = addrin_to_address(addrin, addr_buf, addr_len)
-			addr = if addr_buf.address_is_null then
-					"Unknown address"
-				else addr_buf.to_s
-		end
+		var addr = listener.resolve_addr(addrin)
+
 		var conn = spawn_connection(bev, addr)
 		bev.enable ev_read|ev_write
 		bev.setcb conn
@@ -547,21 +569,6 @@ class ConnectionFactory
 		end
 		return listener
 	end
-
-	# Put string representation of source `address` into `buf`
-	private fun addrin_to_address(address: Pointer, buf: CString, buf_len: Int): CString `{
-		struct sockaddr *addrin = (struct sockaddr*)address;
-
-		if (addrin->sa_family == AF_INET) {
-			struct in_addr *src = &((struct sockaddr_in*)addrin)->sin_addr;
-			return (char *)inet_ntop(addrin->sa_family, src, buf, buf_len);
-		}
-		else if (addrin->sa_family == AF_INET6) {
-			struct in6_addr *src = &((struct sockaddr_in6*)addrin)->sin6_addr;
-			return (char *)inet_ntop(addrin->sa_family, src, buf, buf_len);
-		}
-		return NULL;
-	`}
 end
 
 # Enable some relatively expensive debugging checks that would normally be turned off
