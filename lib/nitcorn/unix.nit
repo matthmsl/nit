@@ -15,7 +15,7 @@
 # limitations under the License.
 module unix
 
-import nitcorn::reactor
+intrude import nitcorn::reactor
 import nitcorn::file_server
 import nitcorn::sessions
 import nitcorn::signal_handler
@@ -23,26 +23,9 @@ import core::file
 import libevent
 intrude import core::array
 
-redef class ServerConfig
-	# Handle to retreive the `HttpFactory` on config change
-	private var factory: HttpFactory is noinit
-
-	private init with_factory(factory: HttpFactory) do self.factory = factory
-end
-
-redef class HttpFactory
-	# Configuration of this server
-	#
-	# It should be populated after this object has instanciated
-	redef var config = new ServerConfig.with_factory(self)
-end
-
 redef class Interface
 	# Path of UNIX socket file
-	var unix_path = "" is optional, writable
-	# # Has `self` been registered by `listen_on`?
-	private var registered = false
-
+	var unix_path= "" is lazy, optional, writable
 end
 
 redef class Interfaces
@@ -69,6 +52,7 @@ end
 
 redef class VirtualHost
 
+	# Defines unix socket's file location
 	fun unix(path:String)
 	do
 		for i in interfaces do	i.unix_path=path
@@ -77,24 +61,55 @@ end
 
 
 redef class Sys
-	private var listeners = new HashMap2[String,String, ConnectionListener]
-	private var listeners_count = new HashMap2[String, String, Int]
-	fun listen_on(interfac: Interface, factory: HttpFactory)
+	private var unix_listeners = new HashMap2[String,String, ConnectionListener]
+	private var unix_listeners_count = new HashMap2[String, String, Int]
+
+	# Activate unix and TCP listeners
+	redef fun listen_on(interfac: Interface, factory: HttpFactory)
 	do
 		if interfac.registered then return
+
 		var name = interfac.name
 		var file = interfac.unix_path
-		var listener = listeners[name,file]
+		var port = interfac.port
+
+		if file!="" then
+			unix_listen(name, file, factory)
+		else
+			tcp_listen(name, port, factory)
+		end
+		interfac.registered = true
+	end
+
+	# Activate TCP listeners
+	private fun tcp_listen(name: String, port: Int, factory: HttpFactory)
+	do
+		var listener = listeners[name, port]
+		if listener == null then
+			listener = factory.bind_to(name, port)
+			if listener != null then
+				sys.listeners[name, port] = listener
+				listeners_count[name, port] = 1
+			end
+		else
+			var value = listeners_count[name, port].as(not null)
+			listeners_count[name, port] = value + 1
+		end
+	end
+
+	# Activate UNIX listeners
+	private fun unix_listen(name: String, file: String, factory: HttpFactory)
+	do
+		var listener = unix_listeners[name,file]
 		if listener == null then
 			listener = factory.bind_to_unix(name,file)
 			if listener != null then
-				sys.listeners[name,file] = listener
-				sys.listeners_count[name,file] = 1
+				sys.unix_listeners[name,file] = listener
+				sys.unix_listeners_count[name,file] = 1
 			end
 		else
-			var value = listeners_count[name,file].as(not null)
-			listeners_count[name,file] = value + 1
+			var value = unix_listeners_count[name,file].as(not null)
+			unix_listeners_count[name,file] = value + 1
 		end
-		interfac.registered = true
 	end
 end
